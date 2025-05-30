@@ -2,7 +2,7 @@ module.exports = {
   apps: [
     {
       name: 'autoai-bot',
-      script: 'dist/main.js',          // Точка входа бота, после сборки в dist
+      script: 'dist/src/main.js',          // Точка входа бота, после сборки в dist
       cwd: './',                       // Рабочая директория
       instances: 1,                    // Количество инстансов
       autorestart: true,               // Автоматический рестарт при сбоях

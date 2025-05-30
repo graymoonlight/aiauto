@@ -21,6 +21,9 @@ export class TelegramService implements OnModuleInit {
   private bot: Telegraf<Context>;
   private uploadDir = path.join(__dirname, '..', '..', 'uploads');
   private userSessions = new Map<number, SessionData>();
+  private mediaGroupBuffers = new Map<string, { userId: number, photos: PhotoSize[], caption: string, timer: NodeJS.Timeout }>();
+  private mediaGroups = new Map<string, { userId: number; photos: PhotoSize[]; caption?: string }>();
+  private mediaGroupTimers = new Map<string, NodeJS.Timeout>();
 
   // Хранит ID пользователей, которые прошли авторизацию
   private authenticatedUsers = new Set<number>();
@@ -143,28 +146,36 @@ export class TelegramService implements OnModuleInit {
     // Обработка фото — только если авторизован
     this.bot.on('photo', async (ctx) => {
       const userId = ctx.from?.id;
-      if (!userId) return;
+        if (!userId) return;
+        if (!this.authenticatedUsers.has(userId)) {
+          await ctx.reply('❗ Пожалуйста, авторизуйтесь, прежде чем отправлять фото.');
+          return;
+        }
 
-      if (!this.authenticatedUsers.has(userId)) {
-        await ctx.reply('❗ Пожалуйста, авторизуйтесь, прежде чем отправлять фото.');
-        return;
-      }
+        const message = ctx.message;
+        const mediaGroupId = message.media_group_id;
+        const caption = message.caption || '';
 
-      try {
-        const caption = ctx.message.caption || '';
-        const photos = ctx.message.photo;
+  if (mediaGroupId) {
+    // Если альбом
+    const existing = this.mediaGroupBuffers.get(mediaGroupId);
+    if (existing) {
+      existing.photos.push(...message.photo);
+    } else {
+      const timer = setTimeout(async () => {
+        const buffer = this.mediaGroupBuffers.get(mediaGroupId);
+        if (!buffer) return;
 
-        const savedPath = await this.saveBestPhoto(ctx, photos);
-        const generatedText = await this.deepseek.generateText(caption);
+        const bestPhoto = buffer.photos.sort((a, b) => (b.file_size ?? 0) - (a.file_size ?? 0))[0];
+        const savedPath = await this.saveBestPhoto(ctx, [bestPhoto]);
+        const generatedText = await this.deepseek.generateText(buffer.caption);
 
-        // Сохраняем сессию
         this.userSessions.set(userId, {
           photoPath: savedPath,
-          caption,
+          caption: buffer.caption,
           generatedText,
         });
 
-        // Отправляем текст и фото в одном сообщении
         await ctx.replyWithPhoto(
           { source: fs.createReadStream(savedPath) },
           {
@@ -176,10 +187,48 @@ export class TelegramService implements OnModuleInit {
             ]),
           }
         );
-      } catch (error) {
-        await ctx.reply('Произошла ошибка: ' + error.message);
-      }
+
+        this.mediaGroupBuffers.delete(mediaGroupId);
+      }, 700); // задержка ожидания всех фото
+
+      this.mediaGroupBuffers.set(mediaGroupId, {
+        userId,
+        caption,
+        photos: [...message.photo],
+        timer,
+      });
+    }
+
+    return;
+  }
+
+  // Одиночное фото
+  try {
+    const savedPath = await this.saveBestPhoto(ctx, message.photo);
+    const generatedText = await this.deepseek.generateText(caption);
+
+    this.userSessions.set(userId, {
+      photoPath: savedPath,
+      caption,
+      generatedText,
     });
+
+    await ctx.replyWithPhoto(
+      { source: fs.createReadStream(savedPath) },
+      {
+        caption: generatedText,
+        parse_mode: 'HTML',
+        ...Markup.inlineKeyboard([
+          [{ text: '✅ Опубликовать', callback_data: 'publish' }],
+          [{ text: '🔄 Перегенерировать', callback_data: 'regenerate' }],
+        ]),
+      }
+    );
+  } catch (error) {
+    await ctx.reply('Произошла ошибка: ' + error.message);
+  }
+});
+
 
     // Обработка callback query — тоже только для авторизованных
     this.bot.on('callback_query', async (ctx) => {
